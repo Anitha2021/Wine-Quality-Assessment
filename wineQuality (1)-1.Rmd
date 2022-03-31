@@ -1,0 +1,569 @@
+```{r}
+library(ggplot2)
+library(caret)
+library(tidyverse)
+library(caTools)
+library(glmnet)
+library(DAAG)
+library(class)
+library(factoextra)
+library(caret)
+library(e1071)
+library(tidyverse)
+library(tibble)
+library(purrr)
+library(forcats)
+library(stringr)
+library(readr)
+library (DAAG)
+library(latticeExtra)
+library(MASS)
+library(leaps)
+library(DT)
+library(knitr)
+library(rpart.plot)
+library(fpc)
+library(corrplot)
+library(cluster)
+library(GGally)
+library(gridExtra)
+library(psych)
+```
+
+
+```{r}
+#Question 1 
+
+#Prepare and explore the data
+
+df <- read.csv("C:/Users/swati/Downloads/winequality-red.csv")
+
+
+#Make a new column (call it quality_group) that splits the wine into three categories (for low, medium, and high quality). Base this categorization on the pre-existing quality column (you can decide the numeric ranges to use for each group). 
+
+createTrainTestData<-function(df, seed, split){
+  df$quality_group <- NA
+  
+  for(row in 1:nrow(df)){
+    quality_num <- df[row, "quality"]
+    quality_class <- "NA"
+    if (quality_num == 3 || quality_num == 4)
+      quality_class <- "low"
+    else if (quality_num == 5 || quality_num == 6)
+      quality_class <- "medium"
+    else if (quality_num == 7 || quality_num == 8)
+      quality_class <- "high"
+    df[row, "quality_group"] <- quality_class
+  }
+  
+  #Explore the data. 
+  df <- subset(df, select= -c(quality))
+  summary(df)
+  training_ind <- createDataPartition(df$quality_group, p = split, list = FALSE)
+
+  train_data <- df[training_ind, ]
+  test_data <- df[-training_ind, ]
+  
+  return(list(train_data, test_data))
+  
+  # train_X <- subset(train_data, select = -c(quality_group))
+  # test_X <- subset(test_data, select = -c(quality_group))
+  #
+  # preProcVal <- preProcess(train_X, method = c("range"))
+  # train_X <- predict(preProcVal, train_X)
+  # test_X <- predict(preProcVal, test_X)
+  #
+  # train_Y <- subset(train_data, select = c(quality_group))
+  # test_Y <- subset(test_data, select = c(quality_group))
+
+  # return(list(train_X, train_Y, test_X, test_Y))
+  
+}
+
+seed = 221
+set.seed(seed)
+
+#Split the data into 80% training and 20% testing.
+dataset <- createTrainTestData(df, seed , 0.8)
+
+train_data <- dataset[[1]]
+test_data <- dataset[[2]]
+
+trControl <- trainControl(method = "repeatedcv",
+                          number = 10,
+                          repeats = 3)
+
+fit <- train(quality_group ~ .,
+             data = train_data,
+             method = 'knn',
+             tuneLength = 20,
+             trControl = trControl,
+             preProc = c("center", "scale"),
+             tuneGrid = expand.grid(k = 1:60))
+
+pred <- predict(fit, newdata = test_data)
+confusionMatrix(pred, as.factor(test_data$quality_group))
+
+
+createTrainTestData<-function(df, seed, split){
+  df$quality_group <- "NA"
+  
+  for(row in 1:nrow(df)){
+    quality_num <- df[row, "quality"]
+    quality_class <- "NA"
+    if (quality_num == 3 || quality_num == 4)
+      quality_class <- "low"
+    else if (quality_num == 5 || quality_num == 6)
+      quality_class <- "medium"
+    else if (quality_num == 7 || quality_num == 8)
+      quality_class <- "high"
+    df[row, "quality_group"] <- quality_class
+  }
+  
+  df <- subset(df, select= -c(quality))
+  df0 <- df[df$quality_group == "low", ]
+  df1 <- df[df$quality_group == "medium", ]
+  df2 <- df[df$quality_group == "high", ]
+  training_ind_0 <- sample(nrow(df0), split*nrow(df0))
+  training_ind_1 <- sample(nrow(df1), split*nrow(df1))
+  training_ind_2 <- sample(nrow(df2), split*nrow(df2))
+  train_data <- rbind(df0[training_ind_0, ], df1[training_ind_1, ], df2[training_ind_2, ])
+  test_data <- rbind(df0[-training_ind_0, ], df1[-training_ind_1, ], df2[-training_ind_2, ])
+  
+  return(list(train_data, test_data))
+}
+
+
+
+
+```
+
+
+
+```{r}
+rm(list = ls())
+
+
+packages = c("tidyverse", "RCurl", "psych", "stats", 
+             "randomForest", "glmnet", "caret","kernlab", 
+             "rpart", "rpart.plot", "neuralnet", "C50",
+             "doParallel", "AUC", "ggfortify")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))  
+}
+invisible(lapply(packages, require, character.only = TRUE))
+
+# customized functions to evaluate model performance for continuous predictors
+eval = function(pred, true, plot = F, title = "") {
+  rmse = sqrt(mean((pred - true)^2))
+  mae = mean(abs(pred - true))
+  cor = cor(pred, true)
+  if (plot == TRUE) {
+    par(mfrow = c(1,2), oma = c(0, 0, 2, 0))
+    diff = pred - true
+    plot(jitter(true, factor = 1), 
+         jitter(pred, factor = 0.5),
+         pch = 3, asp = 1,
+         xlab = "Truth", ylab = "Predicted") 
+    abline(0,1, lty = 2)
+    hist(diff, breaks = 20, main = NULL)
+    mtext(paste0(title, " predicted vs. true using test set"), outer = TRUE)
+    par(mfrow = c(1,1))}
+  return(list(rmse = rmse,
+              mae = mae,
+              cor = cor))
+}
+
+#  for binary predictors
+eval_class = function(prob, true, plot = F, title = "") {
+    # find cutoff with the best kappa
+    cuts = seq(0.01, 0.99, by=0.01)
+    kappa = c()
+    for (cut in cuts){
+      cat = as.factor(ifelse(prob >= cut, 1, 0))
+      cm = confusionMatrix(cat, true, positive = "1")
+      kappa = c(kappa, cm$overall[["Kappa"]])
+    }
+    opt.cut = cuts[which.max(kappa)]
+    
+    # make predictions based on best kappa
+    pred = as.factor(ifelse(prob >= opt.cut, 1, 0))
+    confM = confusionMatrix(pred, true, positive = "1")
+    
+    # calculate AUC
+    roc = roc(as.vector(prob), as.factor(true))
+    auc = round(AUC::auc(roc),3)
+    
+    if (plot==T){
+      # plot AUC
+      par(mfrow = c(1,2), oma = c(0, 0, 2, 0))
+      plot(roc, main = "AUC curve"); abline(0,1)
+      text(0.8, 0.2, paste0("AUC = ", auc))
+      
+      # plot confusion matrix
+      tab = table(true, pred)
+      plot(tab,
+           xlab = "Truth",
+           ylab = "Predicted",
+           main = "Confusion Matrix")
+      text(0.9, 0.9, paste0('FN:', tab[2,1]))
+      text(0.9, 0.05, paste0('TP:', tab[2,2]))
+      text(0.1, 0.9, paste0('TN:', tab[1,1]))
+      text(0.1, 0.05, paste0('FP:', tab[1,2]))
+      mtext(paste0(title, " predicted vs. true using test set"), outer = TRUE)
+      par(mfrow = c(1,1))
+      }
+    return(list(auc=auc, 
+                confusionMatrix = confM))
+}
+
+
+#Observations
+
+#The dataset is in excellent condition, with no missing data and a well-defined structure. All of the variables are numbers. Because the range of independent variables is so wide, hence normalize them so that they're all in the same ballpark when the model is built.
+# Calculating each variable's pairwise association. The quality variable and other covariantes do not have an obvious linear connection, as seen in the following figure, indicating that a basic linear regression is not feasible. There is also some collinearity between covariantes. These contradict the linear model's assumption.
+```
+
+
+```{r}
+raw = read.csv("C:/Users/swati/Downloads/winequality-red.csv")
+
+n = nrow(raw)
+p = ncol(raw)
+dim(raw)
+str(raw) # check the general structure
+summary(raw) # check the summary
+pairs.panels(raw)
+corrplot(cor(raw), type="lower", method="number")
+
+head(raw)
+nrow(raw)
+
+names(raw)
+
+any(is.na.data.frame(raw))
+#split the dataset into a training and testing set, and normalize each set separately
+set.seed(1)
+idx = sample(n, 0.8*n)
+train = raw[idx,]; dim(train)
+test = raw[-idx,]; dim(test)
+
+normalize_train = function(x) (x - min(x))/(max(x) - min(x))
+train.norm = data.frame(apply(train[,-p], 2, normalize_train), 
+                        quality = train[,p])
+summary(train.norm)
+
+# normalize test set using the values from train set to make prediction comparable
+train.min = apply(train[,-p], 2, min)
+train.max = apply(train[,-p], 2, max)
+test.norm = data.frame(sweep(test, 2, c(train.min, 0)) %>% 
+                         sweep(2, c(train.max-train.min, 1), FUN = "/"))
+summary(test.norm)
+```
+
+
+```{r}
+#Further Exploration
+
+redWine <- read_csv("C:/Users/swati/Downloads/winequality-red.csv")
+str(redWine)
+#Removing first column 
+redWine <- redWine[,-1]
+
+# Summary of dataset
+
+summary(redWine)
+# visualise the quality variable .
+redWine %>% ggplot(aes(x = quality ))+ geom_histogram()
+
+# Refactoring quality range as low or high
+redWine1 <- redWine %>% 
+          mutate(quality = ifelse(quality <= 5 ,"Low" , "High"))
+
+redWine1$quality <- as.factor(redWine1$quality)
+
+# Plot new variable
+redWine1 %>% ggplot(aes(x = quality))+ geom_bar(width = 0.2)
+
+# Create data partition
+set.seed(123)
+ wine_split <- createDataPartition(redWine1$quality, p = 0.7 , list= FALSE)
+
+wine_train <- redWine1[wine_split ,]
+wine_test <- redWine1[-wine_split,]
+
+#  Standardise data 
+
+preProcValues <- preProcess(wine_train, method = c("center", "scale"))
+
+wine_trainsc <- predict(preProcValues, wine_train )
+wine_testsc <- predict(preProcValues, wine_test )
+
+# Check processed data
+summary(wine_trainsc$alcohol)
+sd(wine_trainsc$alcohol)
+
+# Data processing
+
+wineTrain <- wine_trainsc[,-11]
+wineTest <- wine_testsc[,-11]
+
+wineTrain_label <- wine_trainsc[,11 , drop = TRUE]
+wineTest_label <- wine_testsc[,11 , drop = TRUE]
+```
+
+
+```{r}
+#Question 2
+df<-read.csv("C:/Users/swati/Downloads/winequality-red.csv")
+#K-nearest neighbors classification:
+# Use k-nearest neighbors on the dataset. Because k-nearest neighbors is supervised, use your new quality_group column as the outcome for the classification. 
+
+# Basic knn model
+seed = 2210
+set.seed(seed)
+
+# As we can see from the below plot the dataset is imbalanced with significantly higher samples
+# for quality = 5,6 i.e medium quality
+plot(density(df$quality))
+
+dataset <- createTrainTestData(df, seed , 0.8)
+
+train_data <- dataset[[1]]
+test_data <- dataset[[2]]
+
+
+# To tackle the inherent imbalance we must use sampling techniques. However, they have their own problems. Down sampling (reducing the number of samples of majority class to match minority # class) will improve the f score and predictions of the minority class. But it significantly    #reduces the overall accuracy by poorly predicting the majority class.
+# Removing the 'sampling = down' term i.e downsampling gives an accuracy ~ 0.8 but it will not predict minority class correctly (with f score almost zero for minority class)
+# down sampling reduces accuracy to 0.63 but it will predict the minority class better
+trControl <- trainControl(method = "repeatedcv",
+                          number = 5,
+                          repeats = 10,
+                          sampling = "down")
+
+fit <- train(quality_group ~ .,
+             data = train_data,
+             method = 'knn',
+             trControl = trControl,
+             preProc = c("center", "scale"),
+             tuneGrid = expand.grid(k = 1:60))
+print(fit)
+
+
+pred <- predict(fit, newdata = test_data)
+confusionMatrix(as.factor(test_data$quality_group), pred, mode = "everything")
+plot(fit)
+
+
+set.seed(123)
+
+wineknns<- knn(train = wineTrain, test=wineTest, cl=wineTrain_label, k=39)
+
+# Evaluating model performance
+
+confusionMatrix(wineTest_label, wineknns)
+
+#KNN using caret
+# Setting up train controls
+repeats = 3
+numbers = 10
+tunel = 20
+
+
+
+trnCntrl = trainControl(method = "repeatedcv",
+                 number = numbers,
+                 repeats = repeats,
+                 classProbs = TRUE,
+                 summaryFunction = twoClassSummary)
+
+# KNN using train method fron caret
+set.seed(123)
+wineKnn <- train(quality~. , data = wine_trainsc, method = "knn",
+               trControl = trnCntrl,
+               metric = "ROC",
+               tuneLength = tunel)
+
+# Summary of model
+wineKnn
+
+# Plot to visualize optimal k selection
+plot(wineKnn)
+
+# Predict values using model 
+test_pred <- predict(wineKnn ,wine_testsc, type = "prob")
+
+# Reforctoring values in two classes
+test_pred$final <- as.factor(ifelse(test_pred$High > 0.5 ,"High","Low"))
+
+#Evaluating model performance
+confusionMatrix(wineTest_label, test_pred$final)
+
+
+#Describe the model. How accurate is your knn classifier?
+
+# The plot above shows optimal value for k as 15 . And the final model was built using K = 15
+
+# Finally to make predictions on our test set, we use predict function in which the first argument is the formula to be applied and second argument is the new data on which we want the predictions.
+# repeated cross validation method using trainControl . Number denotes either the number of folds and ‘repeats’ is for repeated ‘r’ fold cross validation. In this case, 3 separate 10-fold validations are used.
+#Generally the k is selected as square root of no. of observation 
+#Accuracy of our model is ~70% , which means there is scope of improvement in our model prediction.
+```
+
+
+```{r}
+#Question 3
+
+library(caret)
+wine <- read.csv("C:/Users/swati/Downloads/winequality-red.csv")
+par(mar=c(7,5,1,1))
+
+wine$quality<-as.factor(wine$quality)
+
+#xwine <- scale(wine)
+
+boxplot(fixed.acidity ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(volatile.acidity ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(citric.acid ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(residual.sugar ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(chlorides ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(free.sulfur.dioxide ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(total.sulfur.dioxide ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(density ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(pH ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(sulphates ~ quality, data=wine, col=c(grey(.2),2:6))
+boxplot(alcohol ~ quality, data=wine, col=c(grey(.2),2:6))
+
+
+## Inference about the boxplots.
+
+##Fitting data into train(80%) and test(20%) 
+set.seed(1234)
+training_ind <- createDataPartition(wine$quality, p = 0.80, list = FALSE)
+
+train_data <- wine[training_ind, ]
+test_data <- wine[-training_ind, ]
+
+# Setting the reference level
+
+train_data$quality <- relevel(train_data$quality, ref = "3")
+
+#Training multinomial classification model
+
+library(nnet)
+# Training the multinomial model
+multinom_model <- multinom(quality ~ ., data = train_data)
+# Checking the model
+summary(multinom_model)
+
+
+#fitted values
+head(round(fitted(multinom_model), 2))
+
+
+#predicting and validating model
+
+# Predicting the values for train dataset
+train_data$qualityPredicted <- predict(multinom_model, newdata = train_data, "class")
+# Building classification table
+tab <- table(train_data$quality, train_data$qualityPredicted)
+# Calculating accuracy - sum of diagonal elements divided by total obs
+round((sum(diag(tab))/sum(tab))*100,2)
+
+
+#Predicting the class on test dataset.
+# Predicting the class for test dataset
+test_data$qualityPredicted <- predict(multinom_model, newdata = test_data, "class")
+# Building classification table
+tab1 <- table(test_data$quality, test_data$qualityPredicted)
+# Calculating accuracy - sum of diagonal elements divided by total obs
+round((sum(diag(tab1))/sum(tab1))*100,2)
+
+# The accuracy of the model is 59.31% with the test data. The accuracy is pretty good for the clustering but there is scope for improvement in our predictions.
+# in this case the binomial model we take all the content variables and the outcome variable.
+
+```
+
+
+```{r}
+
+#Question 4
+
+# K-means clustering:
+# Clustering with K-means
+
+# Finally, cluster the dataset with k=3 using k-means clustering. Ignore the quality group and quality columns because k-means is unsupervised. Make use of the practice set.
+
+
+
+# K-means clustering is a popular clustering algorithm that divides the predictors into k groups. Each observation is assigned to the cluster with the shortest distance between its centers. The centroids are then recalculated using the column means and the observations from each cluster. The technique is continued until all of the centers are aligned. This is comparable to the KNN technique.
+
+
+
+# The number of clusters, k, is a tuning parameter that can be calculated before the algorithm is executed.
+wine<-scale(raw)
+
+km<-kmeans(wine, 3, nstart=25)
+km
+
+#Determining the centroids
+km$centers
+
+
+fviz_cluster(object= km, data=raw, ellipse.type = "norm", geom="point", palette= "jco", main="", ggtheme = theme_classic())
+
+#Determining whether the number of clusters is ideal
+
+wss<-(nrow(wine)-1)*sum(apply(wine,2,var))
+for(i in 1:15) wss[i]<-sum(kmeans(wine,centers=i)$withinss)
+plot(1:15,wss,type='b',xlab="Number of Clusters",ylab='Within groups sum of squares')
+
+fit1 <- kmeans(wine,6)
+fit2 <- kmeans(wine,8)
+
+fviz_nbclust(wine, kmeans, method='wss')+geom_vline(xintercept = 4, linetype=5, col="darkred")
+
+
+# Users must select the number of clusters to be formed in partitioning methods such as k-means clustering. The factoextra package's function fviz nbclust calculates and visualizes the ideal number of clusters using a variety of approaches, including within-cluster sums of squares, average silhouette, and gap statistics.
+
+# Increasing the value has minimal effect and increases the overlaps between the clusters.
+
+
+
+#The clustering method, which is the most extensively used unsupervised learning technique, is self-improving and does not require any parameters.
+
+
+
+# The basic data mining tool K-means has the advantage that, unlike traditional statistical methods, the clustering algorithms do not rely on statistical distributions of data and may be used with minimum prior information.
+
+
+
+#However, one of the major drawbacks is is one has to specify the number of clusters as an input in the algorithm and that might impact the results as the results are dependant on the initial values.
+```
+
+
+
+Question 5
+
+K-nearest neighbors classification:
+It is one of the simplest easy to implement supervised algorithm.The KNN algorithm assumes that similar things exist in close proximity.To select the K that’s right for your data, we run the KNN algorithm several times with different values of K and choose the K that reduces the number of errors we encounter while maintaining the algorithm’s ability to accurately make predictions when it’s given data it hasn’t seen before. Because k-nearest neighbors is supervised, use your new quality_group column as the outcome for the classification. 
+
+K-means clustering method:
+One common clustering method is k-means, that groups the predictors in k clusters. Each observation is assigned to the cluster that has the closest center. Then, the centroids are redefined with the observations of each cluster using the column means. The process is repeated until the centers converge. This approach is similar to KNN
+
+The number of clusters k is a tuning parameter, and may be estimated before running the algorithm
+
+Multinomial Logit regression:
+Multinomial regression method is a statistical classification method that is used when we have more than 1 descrete outcomes.The outcome variable in this case can be continous or dichotomous.One of the major contrast between multinomial LR and Knn is that we can derive confidence interval in multinomial where as Knn gives only output labels.
+
+
+We can observe that good quality wines have greater levels of alcohol on average, lower volatile acidity on average, higher levels of sulphates on average, and higher levels of residual sugar on average when we look at the specifics.
+
+It's still not an optimal model because the recall results aren't representative enough for any of the classes. To improve the model in this case, we'll need more data to train it.
+Balanced Accuracy is 0.60355,0.50000 and 0.5776 for the high low and medium classes.
+For K nearest Neighbors - To tackle the inherent imbalance we must use sampling techniques. However, they have their own problems. Down sampling (reducing the number of samples of majority class to match minority # class) will improve the f score and predictions of the minority class. But it significantly    #reduces the overall accuracy by poorly predicting the majority class.
+Removing the 'sampling = down' term i.e downsampling gives an accuracy ~ 0.8 but it will not predict minority class correctly (with f score almost zero for minority class)down sampling reduces accuracy to 0.63 but it will predict the minority class better.Accuracy of our model is ~70% , which means there is scope of improvement in our model prediction.
+
+For the Multinomial model the accuracy of the model is 59.31% with the test data. The accuracy is pretty good for the clustering but there is scope for improvement in our predictions.In this case the binomial model we take all the content variables and the outcome variable.
+
+For the K means we can see that the algorithm performed well on the training set (70.3 percent accuracy), but even better on the test set (73.3 percent accuracy) (which is more relevant because we like to test the system on data that has never been "seen" before).Scaling of data and PCA can lead to better results.
